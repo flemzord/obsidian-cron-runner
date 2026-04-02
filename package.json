@@ -1,0 +1,17 @@
+{
+  "name": "cron-runner",
+  "version": "1.0.0",
+  "description": "Obsidian plugin to run cron-scheduled tasks from markdown files",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "tslib": "2.6.0",
+    "typescript": "5.3.3"
+  }
+}
