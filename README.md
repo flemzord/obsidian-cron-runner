@@ -143,7 +143,17 @@ action: "Stay hydrated! Drink some water."
 | Cron folder | `Crons` | Vault folder containing cron files |
 | Check interval | `60s` | How often to check for due crons (min: 10s) |
 | Show notices | `true` | Display a notification when a cron runs |
+| Allow shell commands | `false` | Enable shell command execution (see Security section) |
 | Debug mode | `false` | Log debug info to the developer console |
+
+## Security & Disclosures
+
+This plugin:
+
+- **Does not make any network requests** and does not collect telemetry or analytics
+- **Does not access files outside your vault**, except when using the `shell` action type
+- **Shell command execution is disabled by default** and must be explicitly enabled in settings. When enabled, shell commands run with the same OS-level permissions as Obsidian. Only enable this if you fully trust the contents of your cron files. This feature requires desktop (Node.js) and is the reason the plugin is marked `isDesktopOnly`
+- **Modifies cron files** in your vault only to update the `last_run` frontmatter field after each execution
 
 ## Installation
 
@@ -153,7 +163,7 @@ action: "Stay hydrated! Drink some water."
 3. Install and enable
 
 ### Manual
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/flemzord/obsidian-cron-runner/releases)
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/flemzord/obsidian-cron-runner/releases)
 2. Create a folder `.obsidian/plugins/cron-runner/` in your vault
 3. Copy the files into that folder
 4. Enable "Cron Runner" in Settings > Community Plugins
