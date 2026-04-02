@@ -1,7 +1,7 @@
 {
   "id": "cron-runner",
   "name": "Cron Runner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Run scheduled tasks defined as markdown files with cron expressions.",
   "minAppVersion": "1.5.0",
   "author": "Maxence Maireaux",

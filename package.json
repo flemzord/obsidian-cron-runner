@@ -1,6 +1,6 @@
 {
   "name": "cron-runner",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Obsidian plugin to run cron-scheduled tasks from markdown files",
   "main": "main.js",
   "scripts": {

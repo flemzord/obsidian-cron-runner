@@ -1,5 +1,6 @@
 import {
   App,
+  FuzzySuggestModal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -34,6 +35,12 @@ export default class CronRunnerPlugin extends Plugin {
       id: "list-crons",
       name: "List all cron jobs",
       callback: () => this.listCrons(),
+    });
+
+    this.addCommand({
+      id: "run-single-cron",
+      name: "Run a cron job manually",
+      callback: () => this.showCronPicker(),
     });
 
     // Start the interval once layout is ready
@@ -126,7 +133,9 @@ export default class CronRunnerPlugin extends Plugin {
 
     const actionType = (fm["action_type"] as string) || "command";
     const action = fm["action"] as string | undefined;
-    if (!action) return null;
+
+    // For claude action type, the body is the prompt — action is optional
+    if (!action && actionType !== "claude") return null;
 
     return {
       filePath: file.path,
@@ -134,8 +143,12 @@ export default class CronRunnerPlugin extends Plugin {
       cron,
       enabled: fm["enabled"] !== false, // default true
       actionType: actionType as CronJob["actionType"],
-      action,
+      action: action || "",
+      body: content.replace(/^---\n[\s\S]*?\n---\n?/, "").trim(),
       outputFolder: fm["output_folder"] as string | undefined,
+      model: fm["model"] as string | undefined,
+      allowedTools: fm["allowed_tools"] as string[] | undefined,
+      maxTurns: fm["max_turns"] as number | undefined,
       lastRun: fm["last_run"] as string | undefined,
     };
   }
@@ -190,6 +203,9 @@ export default class CronRunnerPlugin extends Plugin {
           break;
         case "notice":
           new Notice(job.action, 5000);
+          break;
+        case "claude":
+          this.executeClaude(job);
           break;
         default:
           this.log(`Unknown action type: ${job.actionType}`);
@@ -285,6 +301,124 @@ export default class CronRunnerPlugin extends Plugin {
     });
   }
 
+  private executeClaude(job: CronJob): void {
+    this.log(`Executing Claude prompt: ${job.name}`);
+
+    const { spawn } = require("child_process") as typeof import("child_process");
+
+    // Use body content as prompt, fall back to action field for external file path
+    let promptContent = job.body || "";
+    if (!promptContent && job.action) {
+      const fs = require("fs") as typeof import("fs");
+      const path = require("path") as typeof import("path");
+      const promptPath = path.resolve(job.action);
+      if (!fs.existsSync(promptPath)) {
+        new Notice(`Cron error: ${job.name} — prompt file not found: ${job.action}`);
+        return;
+      }
+      promptContent = fs.readFileSync(promptPath, "utf-8");
+    }
+
+    if (!promptContent) {
+      new Notice(`Cron error: ${job.name} — no prompt content found`);
+      return;
+    }
+
+    const model = job.model || this.settings.claudeDefaultModel;
+    const claudeBin = this.settings.claudePath;
+
+    // Build args
+    const args: string[] = [
+      "--print",
+      "--model", model,
+    ];
+
+    if (job.maxTurns) {
+      args.push("--max-turns", String(job.maxTurns));
+    }
+
+    if (job.allowedTools && job.allowedTools.length > 0) {
+      for (const tool of job.allowedTools) {
+        args.push("--allowedTools", tool);
+      }
+    }
+
+    // Pass prompt content via stdin
+    args.push("--");
+    args.push(promptContent);
+
+    const startTime = Date.now();
+    new Notice(`Cron: ${job.name} — Claude started (model: ${model})`);
+
+    const child = spawn(claudeBin, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 600000, // 10 min max
+      env: { ...process.env },
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    child.on("close", (code: number | null) => {
+      const duration = Math.round((Date.now() - startTime) / 1000);
+
+      if (code === 0) {
+        this.log(`Claude finished in ${duration}s. Output: ${stdout.slice(0, 500)}`);
+        new Notice(`Cron: ${job.name} — Claude finished (${duration}s)`, 8000);
+
+        // Log output to the cron logs folder
+        this.saveCronLog(job, stdout, duration);
+      } else {
+        this.log(`Claude failed (code ${code}): ${stderr}`);
+        new Notice(`Cron error: ${job.name} — Claude failed (code ${code})`, 10000);
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      this.log(`Claude spawn error: ${err.message}`);
+      new Notice(`Cron error: ${job.name} — ${err.message}`, 10000);
+    });
+  }
+
+  private async saveCronLog(job: CronJob, output: string, duration: number): Promise<void> {
+    const logFolder = `${this.settings.cronFolder}/logs`;
+    const folder = this.app.vault.getAbstractFileByPath(logFolder);
+    if (!folder) {
+      await this.app.vault.createFolder(logFolder);
+    }
+
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    const timeStr = now.toISOString().slice(11, 16).replace(":", "");
+    const safeName = job.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    const logPath = `${logFolder}/${dateStr}-${timeStr}-${safeName}.md`;
+
+    const logContent = [
+      "---",
+      `name: "${job.name}"`,
+      `date: "${now.toISOString()}"`,
+      `duration: ${duration}`,
+      `model: "${job.model || this.settings.claudeDefaultModel}"`,
+      `prompt: "${job.action}"`,
+      "---",
+      "",
+      `# ${job.name} — ${dateStr}`,
+      "",
+      output,
+    ].join("\n");
+
+    await this.app.vault.create(logPath, logContent);
+    this.log(`Log saved: ${logPath}`);
+  }
+
   /**
    * Update the last_run field in the cron file's frontmatter.
    */
@@ -321,6 +455,43 @@ export default class CronRunnerPlugin extends Plugin {
         `${j.enabled ? "✅" : "⏸"} ${j.name}\n   ${j.cron} → ${j.actionType}:${j.action}`
     );
     new Notice(lines.join("\n\n"), 10000);
+  }
+
+  private async showCronPicker(): Promise<void> {
+    const jobs = await this.getCronJobs();
+    if (jobs.length === 0) {
+      new Notice(`No cron jobs found in "${this.settings.cronFolder}/"`);
+      return;
+    }
+    new CronPickerModal(this.app, jobs, (job) => {
+      this.executeJob(job, new Date()).then(() => this.updateLastRun(job, new Date()));
+    }).open();
+  }
+}
+
+class CronPickerModal extends FuzzySuggestModal<CronJob> {
+  private jobs: CronJob[];
+  private onChoose: (job: CronJob) => void;
+
+  constructor(app: App, jobs: CronJob[], onChoose: (job: CronJob) => void) {
+    super(app);
+    this.jobs = jobs;
+    this.onChoose = onChoose;
+    this.setPlaceholder("Pick a cron job to run...");
+  }
+
+  getItems(): CronJob[] {
+    return this.jobs;
+  }
+
+  getItemText(job: CronJob): string {
+    const status = job.enabled ? "ON" : "OFF";
+    return `[${status}] ${job.name} — ${job.cron} (${job.actionType})`;
+  }
+
+  onChooseItem(job: CronJob): void {
+    new Notice(`Running: ${job.name}...`);
+    this.onChoose(job);
   }
 }
 
@@ -392,6 +563,38 @@ class CronRunnerSettingTab extends PluginSettingTab {
           })
       );
 
+    containerEl.createEl("h3", { text: "Claude Integration" });
+
+    new Setting(containerEl)
+      .setName("Claude CLI path")
+      .setDesc("Path to the Claude CLI binary")
+      .addText((text) =>
+        text
+          .setPlaceholder("claude")
+          .setValue(this.plugin.settings.claudePath)
+          .onChange(async (value) => {
+            this.plugin.settings.claudePath = value || "claude";
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Default Claude model")
+      .setDesc("Model used when not specified in the cron file")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("sonnet", "Sonnet")
+          .addOption("opus", "Opus")
+          .addOption("haiku", "Haiku")
+          .setValue(this.plugin.settings.claudeDefaultModel)
+          .onChange(async (value) => {
+            this.plugin.settings.claudeDefaultModel = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("h3", { text: "Advanced" });
+
     new Setting(containerEl)
       .setName("Debug mode")
       .setDesc("Log debug info to the developer console")
@@ -423,6 +626,16 @@ Runs every weekday at 9am and opens today's daily note.
 - templater: render a Templater template
 - create-note: create a note with content from action field
 - notice: show a notification in Obsidian
-- shell: execute a shell command (desktop only, must be enabled in settings)`);
+- claude: run a Claude CLI prompt from a file (async, logs output)
+- shell: execute a shell command (desktop only, must be enabled in settings)
+
+## Claude action example
+action_type: claude
+action: "/path/to/prompt.md"
+model: sonnet
+max_turns: 5
+allowed_tools:
+  - mcp__slack
+  - mcp__notion`);
   }
 }
